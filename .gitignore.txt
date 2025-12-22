@@ -1,0 +1,41 @@
+# --- Dependencies ---
+node_modules/
+vendor/
+
+# --- Build Outputs ---
+dist/
+build/
+out/
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# --- Environment Variables (TUYỆT ĐỐI KHÔNG UP) ---
+.env
+.env.*
+!.env.example
+
+# --- IDE & System ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+
+# --- Docker Volumes (Dữ liệu DB) ---
+postgres_data/
+redis_data/
+rabbitmq_data/
+
+# --- Logs ---
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+*.log
+
+# --- Drizzle Generated (Tùy chọn, thường thì nên up để đồng bộ migration) ---
+# drizzle/
