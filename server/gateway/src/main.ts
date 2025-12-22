@@ -7,6 +7,11 @@ import { AppModule } from './app.module';
 import { ConfigService } from '@nestjs/config';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import {
+  GrpcExceptionFilter,
+  AllExceptionsFilter,
+} from './common/filters/grpc-exception.filter';
+import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 
 /**
  * Bootstrap the NestJS Gateway Application
@@ -44,7 +49,23 @@ async function bootstrap(): Promise<void> {
   });
 
   // =========================================================
-  // 4. Validation Pipe (Global)
+  // 4. Global Exception Filters
+  // Order matters: More specific filters first, generic last
+  // =========================================================
+  app.useGlobalFilters(
+    new GrpcExceptionFilter(), // Handle gRPC errors -> HTTP responses
+    new AllExceptionsFilter(), // Catch-all for remaining exceptions
+  );
+
+  // =========================================================
+  // 5. Global Interceptors
+  // =========================================================
+  app.useGlobalInterceptors(
+    new LoggingInterceptor(), // Log all requests/responses
+  );
+
+  // =========================================================
+  // 6. Validation Pipe (Global)
   // =========================================================
   app.useGlobalPipes(
     new ValidationPipe({
@@ -58,7 +79,7 @@ async function bootstrap(): Promise<void> {
   );
 
   // =========================================================
-  // 5. CORS Configuration
+  // 7. CORS Configuration
   // =========================================================
   app.enableCors({
     origin: nodeEnv === 'production' ? false : true, // Disable in production, configure properly
@@ -68,12 +89,12 @@ async function bootstrap(): Promise<void> {
   });
 
   // =========================================================
-  // 6. Graceful Shutdown Hooks
+  // 8. Graceful Shutdown Hooks
   // =========================================================
   app.enableShutdownHooks();
 
   // =========================================================
-  // 7. Swagger Documentation (Only in Development)
+  // 9. Swagger Documentation (Only in Development)
   // =========================================================
   if (nodeEnv !== 'production') {
     const swaggerConfig = new DocumentBuilder()
@@ -112,7 +133,7 @@ async function bootstrap(): Promise<void> {
   }
 
   // =========================================================
-  // 8. Start Server
+  // 10. Start Server
   // Note: Fastify requires '0.0.0.0' for Docker compatibility
   // =========================================================
   await app.listen(port, '0.0.0.0');

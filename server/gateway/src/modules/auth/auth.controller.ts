@@ -131,6 +131,7 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'Invalid refresh token' })
   async refreshToken(
     @Body() refreshDto: RefreshTokenDto,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     @CurrentUser() _token: ValidatedRefreshToken,
   ) {
     const response = await this.authGrpcService.refreshToken({
