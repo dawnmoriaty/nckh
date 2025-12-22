@@ -8,6 +8,8 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  Req,
+  UnauthorizedException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -16,25 +18,109 @@ import {
   ApiBearerAuth,
 } from '@nestjs/swagger';
 import { TokenService } from './token.service';
+import { AuthGrpcService } from '../grpc/auth-grpc.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { JwtRefreshGuard } from '../../common/guards/jwt-refresh.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/auth.decorator';
 import type { RequestUser } from './strategies/jwt.strategy';
 import type { ValidatedRefreshToken } from './strategies/jwt-refresh.strategy';
+import { RegisterDto, LoginDto, RefreshTokenDto } from './dto';
+
+interface FastifyRequestWithIp {
+  ip: string;
+  headers: { 'user-agent'?: string };
+}
 
 /**
  * Auth Controller
- * Handles authentication-related endpoints
+ * Handles authentication-related endpoints via gRPC to Go Worker
  */
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly tokenService: TokenService) {}
+  constructor(
+    private readonly tokenService: TokenService,
+    private readonly authGrpcService: AuthGrpcService,
+  ) {}
+
+  // =========================================================
+  // PUBLIC ENDPOINTS (Login, Register, Refresh)
+  // =========================================================
+
+  /**
+   * Register new user
+   * Forwards request to Go gRPC Worker
+   */
+  @Post('register')
+  @Public()
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Register new user' })
+  @ApiResponse({ status: 201, description: 'User registered successfully' })
+  @ApiResponse({ status: 400, description: 'Validation error' })
+  @ApiResponse({ status: 409, description: 'Email or username already exists' })
+  async register(@Body() registerDto: RegisterDto) {
+    const response = await this.authGrpcService.register({
+      username: registerDto.username,
+      email: registerDto.email,
+      password: registerDto.password,
+      fullName: registerDto.fullName,
+      phone: registerDto.phone,
+    });
+
+    if (!response.success) {
+      throw new UnauthorizedException(response.message);
+    }
+
+    return {
+      message: response.message,
+      user: response.user,
+    };
+  }
+
+  /**
+   * Login user
+   * Forwards request to Go gRPC Worker
+   */
+  @Post('login')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Login user' })
+  @ApiResponse({ status: 200, description: 'Login successful' })
+  @ApiResponse({ status: 401, description: 'Invalid credentials' })
+  async login(@Body() loginDto: LoginDto, @Req() req: FastifyRequestWithIp) {
+    const response = await this.authGrpcService.login({
+      username: loginDto.emailOrUsername,
+      password: loginDto.password,
+    });
+
+    if (!response.success) {
+      throw new UnauthorizedException(response.message);
+    }
+
+    // Store refresh token in Redis for session management
+    if (response.user && response.refreshToken) {
+      // Extract jti from refresh token (you may need to decode it)
+      // For now, using a hash of the token as ID
+      const tokenId = this.hashToken(response.refreshToken);
+
+      await this.tokenService.storeRefreshToken(response.user.id, tokenId, {
+        ip: req.ip,
+        deviceInfo: req.headers['user-agent'],
+      });
+    }
+
+    return {
+      message: response.message,
+      accessToken: response.accessToken,
+      refreshToken: response.refreshToken,
+      user: response.user,
+    };
+  }
 
   /**
    * Refresh access token
-   * Requires valid refresh token in body
+   * Validates refresh token and gets new tokens from Go Worker
    */
   @Post('refresh')
   @Public()
@@ -44,17 +130,27 @@ export class AuthController {
   @ApiResponse({ status: 200, description: 'Token refreshed successfully' })
   @ApiResponse({ status: 401, description: 'Invalid refresh token' })
   async refreshToken(
-    @CurrentUser() token: ValidatedRefreshToken,
-  ): Promise<{ message: string; note: string }> {
-    // Note: Actual token generation is done by Go worker
-    // This endpoint validates the refresh token
-    // The Gateway should call Go gRPC to generate new tokens
+    @Body() refreshDto: RefreshTokenDto,
+    @CurrentUser() _token: ValidatedRefreshToken,
+  ) {
+    const response = await this.authGrpcService.refreshToken({
+      refreshToken: refreshDto.refreshToken,
+    });
+
+    if (!response.success) {
+      throw new UnauthorizedException(response.message);
+    }
 
     return {
-      message: 'Refresh token is valid',
-      note: 'Call Go gRPC worker to generate new access token',
+      message: response.message,
+      accessToken: response.accessToken,
+      refreshToken: response.refreshToken,
     };
   }
+
+  // =========================================================
+  // PROTECTED ENDPOINTS (Logout, Me, Sessions)
+  // =========================================================
 
   /**
    * Logout current device
@@ -62,7 +158,7 @@ export class AuthController {
   @Post('logout')
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
-  @ApiBearerAuth()
+  @ApiBearerAuth('JWT-auth')
   @ApiOperation({ summary: 'Logout current device' })
   @ApiResponse({ status: 200, description: 'Logged out successfully' })
   async logout(
@@ -78,7 +174,7 @@ export class AuthController {
   @Post('logout-all')
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
-  @ApiBearerAuth()
+  @ApiBearerAuth('JWT-auth')
   @ApiOperation({ summary: 'Logout from all devices' })
   @ApiResponse({ status: 200, description: 'Logged out from all devices' })
   async logoutAll(@CurrentUser() user: RequestUser) {
@@ -90,7 +186,7 @@ export class AuthController {
    */
   @Get('me')
   @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
+  @ApiBearerAuth('JWT-auth')
   @ApiOperation({ summary: 'Get current user info' })
   @ApiResponse({ status: 200, description: 'User info retrieved' })
   getMe(@CurrentUser() user: RequestUser) {
@@ -113,7 +209,7 @@ export class AuthController {
    */
   @Get('sessions')
   @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
+  @ApiBearerAuth('JWT-auth')
   @ApiOperation({ summary: 'Get all active sessions' })
   @ApiResponse({ status: 200, description: 'Sessions retrieved' })
   async getSessions(@CurrentUser() user: RequestUser) {
@@ -135,7 +231,7 @@ export class AuthController {
   @Delete('sessions/:tokenId')
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
-  @ApiBearerAuth()
+  @ApiBearerAuth('JWT-auth')
   @ApiOperation({ summary: 'Revoke specific session' })
   @ApiResponse({ status: 200, description: 'Session revoked' })
   async revokeSession(
@@ -144,5 +240,23 @@ export class AuthController {
   ) {
     await this.tokenService.revokeSession(user.id, tokenId);
     return { message: 'Session revoked successfully' };
+  }
+
+  // =========================================================
+  // PRIVATE HELPERS
+  // =========================================================
+
+  /**
+   * Simple hash function for token ID generation
+   * In production, extract jti from JWT instead
+   */
+  private hashToken(token: string): string {
+    let hash = 0;
+    for (let i = 0; i < token.length; i++) {
+      const char = token.charCodeAt(i);
+      hash = (hash << 5) - hash + char;
+      hash = hash & hash;
+    }
+    return Math.abs(hash).toString(36);
   }
 }

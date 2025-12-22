@@ -6,10 +6,11 @@ import { TokenService } from './token.service';
 import { AuthController } from './auth.controller';
 import { RedisModule } from '../redis/redis.module';
 import { RedisService } from '../redis/redis.service';
+import { GrpcModule } from '../grpc/grpc.module';
 
 /**
  * Auth Module
- * Configures Passport with JWT strategies and token management
+ * Configures Passport with JWT strategies, token management, and gRPC client
  */
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { RedisService } from '../redis/redis.service';
       defaultStrategy: 'jwt',
     }),
     RedisModule,
+    GrpcModule,
   ],
   controllers: [AuthController],
   providers: [JwtStrategy, JwtRefreshStrategy, TokenService, RedisService],

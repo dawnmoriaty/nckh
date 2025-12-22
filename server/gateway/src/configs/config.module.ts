@@ -6,6 +6,7 @@ import { databaseConfig } from './database.config';
 import { jwtConfig } from './jwt.config';
 import { redisConfig } from './redis.config';
 import { rabbitmqConfig } from './rabbitmq.config';
+import { grpcConfig } from './grpc.config';
 
 /**
  * Configuration validation schema using Joi
@@ -36,6 +37,9 @@ const validationSchema = Joi.object({
 
   // RabbitMQ
   RABBITMQ_URL: Joi.string().default('amqp://guest:guest@localhost:5672'),
+
+  // gRPC
+  GRPC_AUTH_URL: Joi.string().default('localhost:9090'),
 });
 
 @Module({
@@ -43,7 +47,14 @@ const validationSchema = Joi.object({
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: ['.env.local', '.env'],
-      load: [appConfig, databaseConfig, jwtConfig, redisConfig, rabbitmqConfig],
+      load: [
+        appConfig,
+        databaseConfig,
+        jwtConfig,
+        redisConfig,
+        rabbitmqConfig,
+        grpcConfig,
+      ],
       validationSchema,
       validationOptions: {
         abortEarly: false,

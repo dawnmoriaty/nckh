@@ -5,51 +5,129 @@ import {
 } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
 import { ConfigService } from '@nestjs/config';
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
-async function bootstrap() {
-  // 1. Dùng FastifyAdapter thay vì mặc định
+/**
+ * Bootstrap the NestJS Gateway Application
+ * Using FastifyAdapter for high performance
+ */
+async function bootstrap(): Promise<void> {
+  const logger = new Logger('Bootstrap');
+
+  // =========================================================
+  // 1. Create Fastify Application
+  // =========================================================
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
-    new FastifyAdapter(),
+    new FastifyAdapter({
+      logger: false, // Use NestJS logger instead of Fastify's
+    }),
+    {
+      bufferLogs: true, // Buffer logs until logger is ready
+    },
   );
 
+  // =========================================================
+  // 2. Get Configuration
+  // =========================================================
   const configService = app.get(ConfigService);
-  const apiPrefix = configService.get<string>('app.apiPrefix', 'api/v1');
+  const nodeEnv = configService.get<string>('app.nodeEnv', 'development');
   const port = configService.get<number>('app.port', 3000);
+  const apiPrefix = configService.get<string>('app.apiPrefix', 'api/v1');
 
-  app.setGlobalPrefix(apiPrefix);
+  // =========================================================
+  // 3. Global Prefix
+  // =========================================================
+  app.setGlobalPrefix(apiPrefix, {
+    exclude: ['health', 'docs', 'docs-json'], // Exclude health check & swagger from prefix
+  });
 
-  // 2. Validation Pipe
+  // =========================================================
+  // 4. Validation Pipe (Global)
+  // =========================================================
   app.useGlobalPipes(
     new ValidationPipe({
-      whitelist: true,
-      transform: true,
-      forbidNonWhitelisted: true,
+      whitelist: true, // Strip properties not in DTO
+      transform: true, // Transform payloads to DTO instances
+      forbidNonWhitelisted: true, // Throw error for extra properties
+      transformOptions: {
+        enableImplicitConversion: true, // Auto-convert primitive types
+      },
     }),
   );
 
-  // 3. CORS
+  // =========================================================
+  // 5. CORS Configuration
+  // =========================================================
   app.enableCors({
-    origin: true,
+    origin: nodeEnv === 'production' ? false : true, // Disable in production, configure properly
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   });
 
-  // 4. Swagger (Vẫn chạy tốt trên Fastify)
-  const config = new DocumentBuilder()
-    .setTitle('NCKH Gateway')
-    .setDescription('Fastify + gRPC Gateway')
-    .setVersion('1.0')
-    .addBearerAuth()
-    .build();
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('docs', app, document);
+  // =========================================================
+  // 6. Graceful Shutdown Hooks
+  // =========================================================
+  app.enableShutdownHooks();
 
-  // 5. Lắng nghe port
-  // Lưu ý: Fastify cần '0.0.0.0' để chạy trong Docker
+  // =========================================================
+  // 7. Swagger Documentation (Only in Development)
+  // =========================================================
+  if (nodeEnv !== 'production') {
+    const swaggerConfig = new DocumentBuilder()
+      .setTitle('NCKH Gateway API')
+      .setDescription(
+        'NestJS Gateway with FastifyAdapter + gRPC Worker Architecture',
+      )
+      .setVersion('1.0.0')
+      .addBearerAuth(
+        {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'JWT',
+          name: 'Authorization',
+          description: 'Enter JWT token',
+          in: 'header',
+        },
+        'JWT-auth',
+      )
+      .addTag('Auth', 'Authentication & Authorization endpoints')
+      .addTag('Users', 'User management endpoints')
+      .addTag('Problems', 'Problem management endpoints')
+      .build();
+
+    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup('docs', app, document, {
+      swaggerOptions: {
+        persistAuthorization: true, // Keep auth token across page refreshes
+        docExpansion: 'none', // Collapse all by default
+        filter: true, // Enable search filter
+        showRequestDuration: true, // Show request duration
+      },
+    });
+
+    logger.log(`📚 Swagger docs available at: /docs`);
+  }
+
+  // =========================================================
+  // 8. Start Server
+  // Note: Fastify requires '0.0.0.0' for Docker compatibility
+  // =========================================================
   await app.listen(port, '0.0.0.0');
-  console.log(`🚀 Gateway (Fastify) running on: ${await app.getUrl()}`);
-  console.log(`📚 Swagger docs: ${await app.getUrl()}/docs`);
+
+  const appUrl = await app.getUrl();
+  logger.log(`🚀 Gateway running on: ${appUrl}`);
+  logger.log(`🌍 Environment: ${nodeEnv}`);
+  logger.log(`📡 API Prefix: /${apiPrefix}`);
 }
-bootstrap();
+
+// =========================================================
+// Handle Uncaught Errors
+// =========================================================
+bootstrap().catch((error: Error) => {
+  const logger = new Logger('Bootstrap');
+  logger.error(`❌ Failed to start application: ${error.message}`, error.stack);
+  process.exit(1);
+});
