@@ -1,0 +1,26 @@
+# =============================================================================
+# NCKH Server - Root .gitignore
+# =============================================================================
+
+# Environment files (chứa secrets)
+.env
+.env.local
+.env.*.local
+
+# Keep example files
+!.env.example
+!.env.*.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/

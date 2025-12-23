@@ -14,6 +14,9 @@ import (
 	"worker/internal/core/ports"
 )
 
+// Ensure AuthService implements ports.AuthService
+var _ ports.AuthService = (*AuthService)(nil)
+
 // AuthService handles authentication business logic
 // Following Clean Architecture, this service only depends on abstractions (ports)
 type AuthService struct {
@@ -49,9 +52,9 @@ type RefreshTokenClaims struct {
 
 // Register creates a new user account
 // Returns the created user with password field cleared
-func (s *AuthService) Register(ctx context.Context, input *domain.CreateUserInput) (*domain.User, error) {
+func (s *AuthService) Register(ctx context.Context, req *ports.RegisterRequest) (*ports.AuthResponse, error) {
 	// Step 1: Check if email already exists
-	emailExists, err := s.userRepo.ExistsByEmail(ctx, input.Email)
+	emailExists, err := s.userRepo.ExistsByEmail(ctx, req.Email)
 	if err != nil {
 		return nil, domain.NewAuthError(
 			domain.ErrDatabaseOperation,
@@ -68,7 +71,7 @@ func (s *AuthService) Register(ctx context.Context, input *domain.CreateUserInpu
 	}
 
 	// Step 2: Check if username already exists
-	usernameExists, err := s.userRepo.ExistsByUsername(ctx, input.Username)
+	usernameExists, err := s.userRepo.ExistsByUsername(ctx, req.Username)
 	if err != nil {
 		return nil, domain.NewAuthError(
 			domain.ErrDatabaseOperation,
@@ -85,7 +88,7 @@ func (s *AuthService) Register(ctx context.Context, input *domain.CreateUserInpu
 	}
 
 	// Step 3: Hash the password using bcrypt with default cost
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, domain.NewAuthError(
 			domain.ErrHashingPassword,
@@ -104,30 +107,25 @@ func (s *AuthService) Register(ctx context.Context, input *domain.CreateUserInpu
 		)
 	}
 
-	// Step 5: Get role ID - use provided role or default role
-	roleID := input.RoleID
-	if roleID == "" {
-		defaultRole, err := s.roleRepo.GetDefaultRole(ctx)
-		if err != nil {
-			return nil, domain.NewAuthError(
-				domain.ErrDefaultRoleNotFound,
-				"failed to assign default role",
-				domain.CodeInternalError,
-			)
-		}
-		roleID = defaultRole.ID
+	// Step 5: Get default role
+	defaultRole, err := s.roleRepo.GetDefaultRole(ctx)
+	if err != nil {
+		return nil, domain.NewAuthError(
+			domain.ErrDefaultRoleNotFound,
+			"failed to assign default role",
+			domain.CodeInternalError,
+		)
 	}
 
 	// Step 6: Create the user entity
 	now := time.Now()
 	user := &domain.User{
 		ID:        userID.String(),
-		RoleID:    roleID,
-		Email:     input.Email,
-		Username:  input.Username,
+		RoleID:    defaultRole.ID,
+		Email:     req.Email,
+		Username:  req.Username,
 		Password:  string(hashedPassword),
-		FullName:  input.FullName,
-		Phone:     input.Phone,
+		FullName:  req.FullName,
 		IsActive:  true,
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -143,17 +141,43 @@ func (s *AuthService) Register(ctx context.Context, input *domain.CreateUserInpu
 		)
 	}
 
-	// Step 8: Clear password before returning
+	// Step 8: Generate tokens for auto-login after registration
+	createdUser.RoleCode = defaultRole.Code
+	createdUser.RoleName = defaultRole.Name
+
+	accessToken, err := s.generateAccessToken(createdUser)
+	if err != nil {
+		return nil, domain.NewAuthError(
+			domain.ErrGeneratingToken,
+			"failed to generate access token",
+			domain.CodeInternalError,
+		)
+	}
+
+	refreshToken, err := s.generateRefreshToken(createdUser.ID)
+	if err != nil {
+		return nil, domain.NewAuthError(
+			domain.ErrGeneratingToken,
+			"failed to generate refresh token",
+			domain.CodeInternalError,
+		)
+	}
+
+	// Clear password before returning
 	createdUser.Password = ""
 
-	return createdUser, nil
+	return &ports.AuthResponse{
+		User:         createdUser,
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+	}, nil
 }
 
 // Login authenticates a user and generates JWT tokens
 // Returns access token, refresh token, user info, and any error
-func (s *AuthService) Login(ctx context.Context, emailOrUsername, password string) (*domain.LoginResult, error) {
+func (s *AuthService) Login(ctx context.Context, req *ports.LoginRequest) (*ports.AuthResponse, error) {
 	// Step 1: Fetch user from repository by email or username
-	user, err := s.userRepo.FindByEmailOrUsername(ctx, emailOrUsername)
+	user, err := s.userRepo.FindByEmailOrUsername(ctx, req.Identifier)
 	if err != nil {
 		if errors.Is(err, domain.ErrUserNotFound) {
 			return nil, domain.NewAuthError(
@@ -179,7 +203,7 @@ func (s *AuthService) Login(ctx context.Context, emailOrUsername, password strin
 	}
 
 	// Step 3: Compare provided password with hashed password using bcrypt
-	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password))
+	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password))
 	if err != nil {
 		if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
 			return nil, domain.NewAuthError(
@@ -243,7 +267,7 @@ func (s *AuthService) Login(ctx context.Context, emailOrUsername, password strin
 	// Step 9: Clear password before returning user info
 	user.Password = ""
 
-	return &domain.LoginResult{
+	return &ports.AuthResponse{
 		User:         user,
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
@@ -251,17 +275,17 @@ func (s *AuthService) Login(ctx context.Context, emailOrUsername, password strin
 }
 
 // RefreshAccessToken generates a new access token using a valid refresh token
-func (s *AuthService) RefreshAccessToken(ctx context.Context, refreshToken string) (string, string, error) {
+func (s *AuthService) RefreshAccessToken(ctx context.Context, refreshToken string) (*ports.TokenResponse, error) {
 	// Step 1: Parse and validate the refresh token
 	claims, err := s.parseRefreshToken(refreshToken)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 
 	// Step 2: Get user ID from claims
 	userID, err := claims.GetSubject()
 	if err != nil {
-		return "", "", domain.NewAuthError(
+		return nil, domain.NewAuthError(
 			domain.ErrInvalidToken,
 			"invalid token subject",
 			domain.CodeInvalidToken,
@@ -272,13 +296,13 @@ func (s *AuthService) RefreshAccessToken(ctx context.Context, refreshToken strin
 	user, err := s.userRepo.FindByID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, domain.ErrUserNotFound) {
-			return "", "", domain.NewAuthError(
+			return nil, domain.NewAuthError(
 				domain.ErrUserNotFound,
 				"user no longer exists",
 				domain.CodeUserNotFound,
 			)
 		}
-		return "", "", domain.NewAuthError(
+		return nil, domain.NewAuthError(
 			domain.ErrDatabaseOperation,
 			"failed to verify user",
 			domain.CodeInternalError,
@@ -286,7 +310,7 @@ func (s *AuthService) RefreshAccessToken(ctx context.Context, refreshToken strin
 	}
 
 	if !user.IsActive {
-		return "", "", domain.NewAuthError(
+		return nil, domain.NewAuthError(
 			domain.ErrUserInactive,
 			"user account is deactivated",
 			domain.CodeInvalidCredentials,
@@ -296,7 +320,7 @@ func (s *AuthService) RefreshAccessToken(ctx context.Context, refreshToken strin
 	// Step 4: Fetch role info for new access token
 	role, err := s.roleRepo.FindByID(ctx, user.RoleID)
 	if err != nil {
-		return "", "", domain.NewAuthError(
+		return nil, domain.NewAuthError(
 			domain.ErrRoleNotFound,
 			"failed to fetch user role",
 			domain.CodeInternalError,
@@ -308,28 +332,20 @@ func (s *AuthService) RefreshAccessToken(ctx context.Context, refreshToken strin
 	// Step 5: Generate new access token
 	newAccessToken, err := s.generateAccessToken(user)
 	if err != nil {
-		return "", "", domain.NewAuthError(
+		return nil, domain.NewAuthError(
 			domain.ErrGeneratingToken,
 			"failed to generate new access token",
 			domain.CodeInternalError,
 		)
 	}
 
-	// Step 6: Generate new refresh token (token rotation for security)
-	newRefreshToken, err := s.generateRefreshToken(user.ID)
-	if err != nil {
-		return "", "", domain.NewAuthError(
-			domain.ErrGeneratingToken,
-			"failed to generate new refresh token",
-			domain.CodeInternalError,
-		)
-	}
-
-	return newAccessToken, newRefreshToken, nil
+	return &ports.TokenResponse{
+		AccessToken: newAccessToken,
+	}, nil
 }
 
 // ValidateAccessToken validates an access token and returns the claims
-func (s *AuthService) ValidateAccessToken(tokenString string) (*AccessTokenClaims, error) {
+func (s *AuthService) ValidateAccessToken(ctx context.Context, tokenString string) (*ports.ValidateResponse, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &AccessTokenClaims{}, func(token *jwt.Token) (interface{}, error) {
 		// Validate signing method
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -362,7 +378,25 @@ func (s *AuthService) ValidateAccessToken(tokenString string) (*AccessTokenClaim
 		)
 	}
 
-	return claims, nil
+	// Fetch user permissions
+	user, err := s.userRepo.FindByID(ctx, claims.Subject)
+	if err != nil {
+		return &ports.ValidateResponse{
+			Valid:       true,
+			UserID:      claims.Subject,
+			Email:       "",
+			Permissions: []string{},
+		}, nil
+	}
+
+	permissions, _ := s.roleRepo.GetPermissionsByRoleID(ctx, user.RoleID)
+
+	return &ports.ValidateResponse{
+		Valid:       true,
+		UserID:      claims.Subject,
+		Email:       user.Email,
+		Permissions: permissions,
+	}, nil
 }
 
 // generateAccessToken creates a new JWT access token
