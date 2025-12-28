@@ -21,7 +21,7 @@ INSERT INTO users (
 ) RETURNING *;
 
 -- name: GetUserByID :one
--- Retrieves a user by their UUID
+-- Retrieves a user by their UUID with role info
 SELECT 
     u.*,
     r.name AS role_name,
@@ -31,7 +31,7 @@ LEFT JOIN roles r ON u.role_id = r.id
 WHERE u.id = $1;
 
 -- name: GetUserByEmail :one
--- Retrieves a user by their email address
+-- Retrieves a user by their email address with role info
 SELECT 
     u.*,
     r.name AS role_name,
@@ -41,7 +41,7 @@ LEFT JOIN roles r ON u.role_id = r.id
 WHERE u.email = $1;
 
 -- name: GetUserByUsername :one
--- Retrieves a user by their username
+-- Retrieves a user by their username with role info
 SELECT 
     u.*,
     r.name AS role_name,
@@ -51,7 +51,7 @@ LEFT JOIN roles r ON u.role_id = r.id
 WHERE u.username = $1;
 
 -- name: GetUserByEmailOrUsername :one
--- Retrieves a user by email OR username (for login)
+-- Retrieves a user by email OR username (for login) with role info
 SELECT 
     u.*,
     r.name AS role_name,
@@ -89,51 +89,3 @@ UPDATE users SET last_login = NOW() WHERE id = $1;
 -- name: DeleteUser :exec
 -- Soft delete is not implemented, this is hard delete
 DELETE FROM users WHERE id = $1;
-
--- =============================================
--- Role Queries
--- =============================================
-
--- name: GetRoleByID :one
--- Retrieves a role by its UUID
-SELECT * FROM roles WHERE id = $1;
-
--- name: GetRoleByCode :one
--- Retrieves a role by its code (e.g., "STUDENT", "ADMIN")
-SELECT * FROM roles WHERE code = $1;
-
--- name: GetDefaultRole :one
--- Retrieves the default role for new users (STUDENT)
-SELECT * FROM roles WHERE code = 'STUDENT' LIMIT 1;
-
--- name: CreateRole :one
--- Creates a new role
-INSERT INTO roles (name, code, description)
-VALUES ($1, $2, $3)
-RETURNING *;
-
--- =============================================
--- Permission Queries
--- =============================================
-
--- name: GetPermissionsByRoleID :many
--- Retrieves all permissions for a given role
-SELECT 
-    p.id,
-    p.role_id,
-    p.resource_id,
-    p.actions,
-    r.code AS resource_code,
-    r.name AS resource_name
-FROM permissions p
-JOIN resources r ON p.resource_id = r.id
-WHERE p.role_id = $1;
-
--- name: GetPermissionActionsByRoleID :many
--- Retrieves flattened permission actions for a role (e.g., "users:read", "users:write")
-SELECT DISTINCT
-    r.code || ':' || action AS permission
-FROM permissions p
-JOIN resources r ON p.resource_id = r.id,
-LATERAL jsonb_array_elements_text(p.actions) AS action
-WHERE p.role_id = $1;

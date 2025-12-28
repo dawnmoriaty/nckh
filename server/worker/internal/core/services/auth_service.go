@@ -7,8 +7,11 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"golang.org/x/crypto/bcrypt"
 
+	"worker/internal/adapter/storage/postgres/sqlc"
+	"worker/internal/common/utils"
 	"worker/internal/config"
 	"worker/internal/core/domain"
 	"worker/internal/core/ports"
@@ -51,8 +54,7 @@ type RefreshTokenClaims struct {
 }
 
 // Register creates a new user account
-// Returns the created user with password field cleared
-func (s *AuthService) Register(ctx context.Context, req *ports.RegisterRequest) (*ports.AuthResponse, error) {
+func (s *AuthService) Register(ctx context.Context, req *domain.RegisterRequest) (*ports.AuthResponse, error) {
 	// Step 1: Check if email already exists
 	emailExists, err := s.userRepo.ExistsByEmail(ctx, req.Email)
 	if err != nil {
@@ -117,22 +119,23 @@ func (s *AuthService) Register(ctx context.Context, req *ports.RegisterRequest) 
 		)
 	}
 
-	// Step 6: Create the user entity
+	// Step 6: Create user params for sqlc
 	now := time.Now()
-	user := &domain.User{
-		ID:        userID.String(),
+	isActive := true
+	createParams := sqlc.CreateUserParams{
+		ID:        userID,
 		RoleID:    defaultRole.ID,
 		Email:     req.Email,
 		Username:  req.Username,
 		Password:  string(hashedPassword),
 		FullName:  req.FullName,
-		IsActive:  true,
-		CreatedAt: now,
-		UpdatedAt: now,
+		IsActive:  &isActive,
+		CreatedAt: pgtype.Timestamp{Time: now, Valid: true},
+		UpdatedAt: pgtype.Timestamp{Time: now, Valid: true},
 	}
 
 	// Step 7: Save to database via repository
-	createdUser, err := s.userRepo.CreateUser(ctx, user)
+	createdUser, err := s.userRepo.CreateUser(ctx, createParams)
 	if err != nil {
 		return nil, domain.NewAuthError(
 			domain.ErrDatabaseOperation,
@@ -141,11 +144,27 @@ func (s *AuthService) Register(ctx context.Context, req *ports.RegisterRequest) 
 		)
 	}
 
-	// Step 8: Generate tokens for auto-login after registration
-	createdUser.RoleCode = defaultRole.Code
-	createdUser.RoleName = defaultRole.Name
+	// Step 8: Build response with role info
+	// Convert sqlc.User to sqlc.GetUserByEmailOrUsernameRow for response
+	userWithRole := &sqlc.GetUserByEmailOrUsernameRow{
+		ID:        createdUser.ID,
+		RoleID:    createdUser.RoleID,
+		Email:     createdUser.Email,
+		Username:  createdUser.Username,
+		Password:  "", // Clear password
+		FullName:  createdUser.FullName,
+		Phone:     createdUser.Phone,
+		Avatar:    createdUser.Avatar,
+		IsActive:  createdUser.IsActive,
+		LastLogin: createdUser.LastLogin,
+		CreatedAt: createdUser.CreatedAt,
+		UpdatedAt: createdUser.UpdatedAt,
+		RoleName:  &defaultRole.Name,
+		RoleCode:  &defaultRole.Code,
+	}
 
-	accessToken, err := s.generateAccessToken(createdUser)
+	// Step 9: Generate tokens
+	accessToken, err := s.generateAccessToken(userWithRole)
 	if err != nil {
 		return nil, domain.NewAuthError(
 			domain.ErrGeneratingToken,
@@ -154,7 +173,7 @@ func (s *AuthService) Register(ctx context.Context, req *ports.RegisterRequest) 
 		)
 	}
 
-	refreshToken, err := s.generateRefreshToken(createdUser.ID)
+	refreshToken, err := s.generateRefreshToken(userID.String())
 	if err != nil {
 		return nil, domain.NewAuthError(
 			domain.ErrGeneratingToken,
@@ -163,19 +182,15 @@ func (s *AuthService) Register(ctx context.Context, req *ports.RegisterRequest) 
 		)
 	}
 
-	// Clear password before returning
-	createdUser.Password = ""
-
 	return &ports.AuthResponse{
-		User:         createdUser,
+		User:         userWithRole,
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 	}, nil
 }
 
 // Login authenticates a user and generates JWT tokens
-// Returns access token, refresh token, user info, and any error
-func (s *AuthService) Login(ctx context.Context, req *ports.LoginRequest) (*ports.AuthResponse, error) {
+func (s *AuthService) Login(ctx context.Context, req *domain.LoginRequest) (*ports.AuthResponse, error) {
 	// Step 1: Fetch user from repository by email or username
 	user, err := s.userRepo.FindByEmailOrUsername(ctx, req.Identifier)
 	if err != nil {
@@ -194,7 +209,7 @@ func (s *AuthService) Login(ctx context.Context, req *ports.LoginRequest) (*port
 	}
 
 	// Step 2: Check if user account is active
-	if !user.IsActive {
+	if !utils.PtrBoolValue(user.IsActive) {
 		return nil, domain.NewAuthError(
 			domain.ErrUserInactive,
 			"user account is deactivated",
@@ -219,27 +234,7 @@ func (s *AuthService) Login(ctx context.Context, req *ports.LoginRequest) (*port
 		)
 	}
 
-	// Step 4: Fetch user's role information for token claims
-	role, err := s.roleRepo.FindByID(ctx, user.RoleID)
-	if err != nil {
-		return nil, domain.NewAuthError(
-			domain.ErrRoleNotFound,
-			"failed to fetch user role",
-			domain.CodeInternalError,
-		)
-	}
-	user.RoleName = role.Name
-	user.RoleCode = role.Code
-
-	// Step 5: Fetch user's permissions
-	permissions, err := s.roleRepo.GetPermissionsByRoleID(ctx, user.RoleID)
-	if err != nil {
-		// Permissions fetch failure is not critical, continue with empty permissions
-		permissions = []string{}
-	}
-	user.Permissions = permissions
-
-	// Step 6: Generate Access Token (HS256, expires in 15 minutes)
+	// Step 4: Generate Access Token
 	accessToken, err := s.generateAccessToken(user)
 	if err != nil {
 		return nil, domain.NewAuthError(
@@ -249,8 +244,8 @@ func (s *AuthService) Login(ctx context.Context, req *ports.LoginRequest) (*port
 		)
 	}
 
-	// Step 7: Generate Refresh Token (HS256, expires in 7 days)
-	refreshToken, err := s.generateRefreshToken(user.ID)
+	// Step 5: Generate Refresh Token
+	refreshToken, err := s.generateRefreshToken(user.ID.String())
 	if err != nil {
 		return nil, domain.NewAuthError(
 			domain.ErrGeneratingToken,
@@ -259,12 +254,12 @@ func (s *AuthService) Login(ctx context.Context, req *ports.LoginRequest) (*port
 		)
 	}
 
-	// Step 8: Update last login timestamp (non-blocking, ignore errors)
+	// Step 6: Update last login timestamp (non-blocking)
 	go func() {
 		_ = s.userRepo.UpdateLastLogin(context.Background(), user.ID)
 	}()
 
-	// Step 9: Clear password before returning user info
+	// Step 7: Clear password before returning
 	user.Password = ""
 
 	return &ports.AuthResponse{
@@ -283,11 +278,20 @@ func (s *AuthService) RefreshAccessToken(ctx context.Context, refreshToken strin
 	}
 
 	// Step 2: Get user ID from claims
-	userID, err := claims.GetSubject()
+	userIDStr, err := claims.GetSubject()
 	if err != nil {
 		return nil, domain.NewAuthError(
 			domain.ErrInvalidToken,
 			"invalid token subject",
+			domain.CodeInvalidToken,
+		)
+	}
+
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		return nil, domain.NewAuthError(
+			domain.ErrInvalidToken,
+			"invalid user ID in token",
 			domain.CodeInvalidToken,
 		)
 	}
@@ -309,7 +313,7 @@ func (s *AuthService) RefreshAccessToken(ctx context.Context, refreshToken strin
 		)
 	}
 
-	if !user.IsActive {
+	if !utils.PtrBoolValue(user.IsActive) {
 		return nil, domain.NewAuthError(
 			domain.ErrUserInactive,
 			"user account is deactivated",
@@ -317,20 +321,18 @@ func (s *AuthService) RefreshAccessToken(ctx context.Context, refreshToken strin
 		)
 	}
 
-	// Step 4: Fetch role info for new access token
-	role, err := s.roleRepo.FindByID(ctx, user.RoleID)
-	if err != nil {
-		return nil, domain.NewAuthError(
-			domain.ErrRoleNotFound,
-			"failed to fetch user role",
-			domain.CodeInternalError,
-		)
+	// Step 4: Convert GetUserByIDRow to GetUserByEmailOrUsernameRow for token generation
+	userForToken := &sqlc.GetUserByEmailOrUsernameRow{
+		ID:        user.ID,
+		RoleID:    user.RoleID,
+		Email:     user.Email,
+		Username:  user.Username,
+		RoleName:  user.RoleName,
+		RoleCode:  user.RoleCode,
 	}
-	user.RoleName = role.Name
-	user.RoleCode = role.Code
 
 	// Step 5: Generate new access token
-	newAccessToken, err := s.generateAccessToken(user)
+	newAccessToken, err := s.generateAccessToken(userForToken)
 	if err != nil {
 		return nil, domain.NewAuthError(
 			domain.ErrGeneratingToken,
@@ -345,9 +347,8 @@ func (s *AuthService) RefreshAccessToken(ctx context.Context, refreshToken strin
 }
 
 // ValidateAccessToken validates an access token and returns the claims
-func (s *AuthService) ValidateAccessToken(ctx context.Context, tokenString string) (*ports.ValidateResponse, error) {
+func (s *AuthService) ValidateAccessToken(ctx context.Context, tokenString string) (*domain.ValidateTokenResult, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &AccessTokenClaims{}, func(token *jwt.Token) (interface{}, error) {
-		// Validate signing method
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, domain.ErrTokenMalformed
 		}
@@ -378,10 +379,21 @@ func (s *AuthService) ValidateAccessToken(ctx context.Context, tokenString strin
 		)
 	}
 
-	// Fetch user permissions
-	user, err := s.userRepo.FindByID(ctx, claims.Subject)
+	// Parse user ID
+	userID, err := uuid.Parse(claims.Subject)
 	if err != nil {
-		return &ports.ValidateResponse{
+		return &domain.ValidateTokenResult{
+			Valid:       true,
+			UserID:      claims.Subject,
+			Email:       "",
+			Permissions: []string{},
+		}, nil
+	}
+
+	// Fetch user to get email and permissions
+	user, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil {
+		return &domain.ValidateTokenResult{
 			Valid:       true,
 			UserID:      claims.Subject,
 			Email:       "",
@@ -391,7 +403,7 @@ func (s *AuthService) ValidateAccessToken(ctx context.Context, tokenString strin
 
 	permissions, _ := s.roleRepo.GetPermissionsByRoleID(ctx, user.RoleID)
 
-	return &ports.ValidateResponse{
+	return &domain.ValidateTokenResult{
 		Valid:       true,
 		UserID:      claims.Subject,
 		Email:       user.Email,
@@ -400,33 +412,31 @@ func (s *AuthService) ValidateAccessToken(ctx context.Context, tokenString strin
 }
 
 // generateAccessToken creates a new JWT access token
-// Claims: sub (User ID), username, role (Role Code), exp (15 minutes)
-func (s *AuthService) generateAccessToken(user *domain.User) (string, error) {
+func (s *AuthService) generateAccessToken(user *sqlc.GetUserByEmailOrUsernameRow) (string, error) {
 	now := time.Now()
 	expirationTime := now.Add(s.config.AccessExpiration)
 
+	roleCode := ""
+	if user.RoleCode != nil {
+		roleCode = *user.RoleCode
+	}
+
 	claims := &AccessTokenClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   user.ID,
+			Subject:   user.ID.String(),
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
 			Issuer:    "worker-auth-service",
 		},
 		Username: user.Username,
-		Role:     user.RoleCode,
+		Role:     roleCode,
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString([]byte(s.config.AccessSecret))
-	if err != nil {
-		return "", err
-	}
-
-	return tokenString, nil
+	return token.SignedString([]byte(s.config.AccessSecret))
 }
 
 // generateRefreshToken creates a new JWT refresh token
-// Claims: sub (User ID), exp (7 days)
 func (s *AuthService) generateRefreshToken(userID string) (string, error) {
 	now := time.Now()
 	expirationTime := now.Add(s.config.RefreshExpiration)
@@ -441,18 +451,12 @@ func (s *AuthService) generateRefreshToken(userID string) (string, error) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString([]byte(s.config.RefreshSecret))
-	if err != nil {
-		return "", err
-	}
-
-	return tokenString, nil
+	return token.SignedString([]byte(s.config.RefreshSecret))
 }
 
 // parseRefreshToken parses and validates a refresh token
 func (s *AuthService) parseRefreshToken(tokenString string) (*RefreshTokenClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &RefreshTokenClaims{}, func(token *jwt.Token) (interface{}, error) {
-		// Validate signing method
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, domain.ErrTokenMalformed
 		}

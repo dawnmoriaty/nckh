@@ -10,7 +10,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ServerDir = Split-Path -Parent $ScriptDir
 
 $GatewaySchema = Join-Path $ServerDir "gateway\drizzle"
-$WorkerSchemaDir = Join-Path $ServerDir "worker\internal\adapter\storage\postgres\db"
+$WorkerSchemaDir = Join-Path $ServerDir "worker\internal\adapter\storage\postgres\schema"
 $WorkerSchemaFile = Join-Path $WorkerSchemaDir "schema.sql"
 
 Write-Host "📦 Syncing schema from Gateway to Worker..." -ForegroundColor Cyan

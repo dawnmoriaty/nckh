@@ -3,9 +3,6 @@ package handler
 import (
 	"context"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	"worker/internal/core/domain"
 	"worker/internal/core/ports"
 	pb "worker/pb"
@@ -26,7 +23,7 @@ func NewAuthHandler(authService ports.AuthService) *AuthHandler {
 
 // Register handles user registration
 func (h *AuthHandler) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.RegisterResponse, error) {
-	result, err := h.authService.Register(ctx, &ports.RegisterRequest{
+	result, err := h.authService.Register(ctx, &domain.RegisterRequest{
 		Username: req.Username,
 		Email:    req.Email,
 		Password: req.Password,
@@ -36,19 +33,19 @@ func (h *AuthHandler) Register(ctx context.Context, req *pb.RegisterRequest) (*p
 		return &pb.RegisterResponse{
 			Success: false,
 			Message: err.Error(),
-		}, mapDomainErrorToGRPC(err)
+		}, MapDomainErrorToGRPC(err)
 	}
 
 	return &pb.RegisterResponse{
 		Success: true,
 		Message: "User registered successfully",
-		User:    mapUserToProto(result.User),
+		User:    MapUserRowToProto(result.User),
 	}, nil
 }
 
 // Login handles user login
 func (h *AuthHandler) Login(ctx context.Context, req *pb.LoginRequest) (*pb.LoginResponse, error) {
-	result, err := h.authService.Login(ctx, &ports.LoginRequest{
+	result, err := h.authService.Login(ctx, &domain.LoginRequest{
 		Identifier: req.Username,
 		Password:   req.Password,
 	})
@@ -56,7 +53,7 @@ func (h *AuthHandler) Login(ctx context.Context, req *pb.LoginRequest) (*pb.Logi
 		return &pb.LoginResponse{
 			Success: false,
 			Message: err.Error(),
-		}, mapDomainErrorToGRPC(err)
+		}, MapDomainErrorToGRPC(err)
 	}
 
 	return &pb.LoginResponse{
@@ -64,7 +61,7 @@ func (h *AuthHandler) Login(ctx context.Context, req *pb.LoginRequest) (*pb.Logi
 		Message:      "Login successful",
 		AccessToken:  result.AccessToken,
 		RefreshToken: result.RefreshToken,
-		User:         mapUserToProto(result.User),
+		User:         MapUserRowToProto(result.User),
 	}, nil
 }
 
@@ -75,7 +72,7 @@ func (h *AuthHandler) RefreshToken(ctx context.Context, req *pb.RefreshTokenRequ
 		return &pb.RefreshTokenResponse{
 			Success: false,
 			Message: err.Error(),
-		}, mapDomainErrorToGRPC(err)
+		}, MapDomainErrorToGRPC(err)
 	}
 
 	return &pb.RefreshTokenResponse{
@@ -104,49 +101,4 @@ func (h *AuthHandler) ValidateToken(ctx context.Context, req *pb.ValidateTokenRe
 			Permissions: result.Permissions,
 		},
 	}, nil
-}
-
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-func mapUserToProto(user *domain.User) *pb.User {
-	if user == nil {
-		return nil
-	}
-
-	return &pb.User{
-		Id:          user.ID,
-		Username:    user.Username,
-		Email:       user.Email,
-		FullName:    user.FullName,
-		RoleId:      user.RoleID,
-		RoleName:    user.RoleName,
-		RoleCode:    user.RoleCode,
-		Permissions: user.Permissions,
-	}
-}
-
-func mapDomainErrorToGRPC(err error) error {
-	if err == nil {
-		return nil
-	}
-
-	// Check for AuthError type
-	if authErr, ok := err.(*domain.AuthError); ok {
-		switch authErr.Code {
-		case domain.CodeUserNotFound:
-			return status.Error(codes.NotFound, authErr.Message)
-		case domain.CodeUserAlreadyExists:
-			return status.Error(codes.AlreadyExists, authErr.Message)
-		case domain.CodeInvalidCredentials, domain.CodeIncorrectPassword:
-			return status.Error(codes.Unauthenticated, authErr.Message)
-		case domain.CodeInvalidToken, domain.CodeTokenExpired:
-			return status.Error(codes.Unauthenticated, authErr.Message)
-		default:
-			return status.Error(codes.Internal, authErr.Message)
-		}
-	}
-
-	return status.Error(codes.Internal, err.Error())
 }

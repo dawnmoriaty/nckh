@@ -1,12 +1,12 @@
 version: "2"
 sql:
   - engine: "postgresql"
-    queries: "internal/adapter/storage/postgres/db/query.sql"
-    schema: "internal/adapter/storage/postgres/db/schema.sql"
+    queries: "internal/adapter/storage/postgres/queries"
+    schema: "internal/adapter/storage/postgres/schema"
     gen:
       go:
-        package: "db"
-        out: "internal/adapter/storage/postgres/db"
+        package: "sqlc"
+        out: "internal/adapter/storage/postgres/sqlc"
         sql_package: "pgx/v5"
         emit_json_tags: true
         emit_db_tags: true

@@ -8,6 +8,7 @@ import (
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 
+	"worker/internal/adapter/storage/postgres/repository"
 	"worker/internal/config"
 	"worker/internal/core/ports"
 )
@@ -18,11 +19,11 @@ var Module = fx.Module("postgres",
 		NewPostgresPool,
 		// Repositories - implement ports interfaces
 		fx.Annotate(
-			NewUserRepository,
+			repository.NewUserRepository,
 			fx.As(new(ports.UserRepository)),
 		),
 		fx.Annotate(
-			NewRoleRepository,
+			repository.NewRoleRepository,
 			fx.As(new(ports.RoleRepository)),
 		),
 	),

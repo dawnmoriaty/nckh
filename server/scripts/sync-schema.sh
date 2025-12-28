@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_DIR="$(dirname "$SCRIPT_DIR")"
 
 GATEWAY_SCHEMA="$SERVER_DIR/gateway/drizzle"
-WORKER_SCHEMA_DIR="$SERVER_DIR/worker/internal/adapter/storage/postgres/db"
+WORKER_SCHEMA_DIR="$SERVER_DIR/worker/internal/adapter/storage/postgres/schema"
 
 echo "📦 Syncing schema from Gateway to Worker..."
 echo "   Source: $GATEWAY_SCHEMA"
